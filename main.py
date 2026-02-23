@@ -1,12 +1,12 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import random, math, time
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 app = FastAPI()
 
-# ✅ CORS (поки відкрито, потім звузимо до Vercel домену)
+# ✅ CORS (поки відкрито, потім звузиш до Vercel домену)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -19,13 +19,14 @@ app.add_middleware(
 RATNE_CENTER_LAT = 51.671708
 RATNE_CENTER_LON = 24.524050
 
-# ✅ Радіус спавну і радіус збору
+# ✅ Радіуси
 SPAWN_RADIUS_M = 1200
 PICKUP_RADIUS_M = 30
 
 # --- In-memory state ---
 drops: List[dict] = []
-users: Dict[str, dict] = {}   # user_id -> {"inv": {"зерно": 0,...}, "last": ts}
+users: Dict[str, dict] = {}   # user_id -> {"inv": {...}, "last": ts}
+
 
 # --- Helpers ---
 def random_point_around(lat: float, lon: float, radius_m: float):
@@ -33,9 +34,11 @@ def random_point_around(lat: float, lon: float, radius_m: float):
     r = radius_m * math.sqrt(random.random())
     theta = random.random() * 2 * math.pi
 
+    # метри -> градуси
     dlat = (r * math.cos(theta)) / 111_320.0
     dlon = (r * math.sin(theta)) / (111_320.0 * math.cos(math.radians(lat)))
     return lat + dlat, lon + dlon
+
 
 def haversine_m(lat1, lon1, lat2, lon2) -> float:
     R = 6371000.0
@@ -43,9 +46,10 @@ def haversine_m(lat1, lon1, lat2, lon2) -> float:
     p2 = math.radians(lat2)
     dp = math.radians(lat2 - lat1)
     dl = math.radians(lon2 - lon1)
-    a = math.sin(dp/2)**2 + math.cos(p1)*math.cos(p2)*math.sin(dl/2)**2
-    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
+    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
     return R * c
+
 
 def get_user(uid: str) -> dict:
     if uid not in users:
@@ -55,13 +59,12 @@ def get_user(uid: str) -> dict:
         }
     return users[uid]
 
+
 def compute_rewards(inv: dict) -> dict:
-    """
-    Простий MVP:
-    - 5 "круасан" = -5%
-    - 10 "круасан" = -10%
-    - 1 "золота чашка" = -15% (один раз, якщо є)
-    """
+    # MVP:
+    # 5 круасанів = -5%
+    # 10 круасанів = -10%
+    # 1 золота чашка = -15%
     cro = inv.get("круасан", 0)
     gold = inv.get("золота чашка", 0)
 
@@ -76,20 +79,25 @@ def compute_rewards(inv: dict) -> dict:
 
     return {"discount_percent": discount}
 
-# --- API models ---
+
+# --- Models ---
 class CollectRequest(BaseModel):
     user_id: str
     drop_id: int
     lat: float
     lon: float
 
+
+# --- Routes ---
 @app.get("/health")
 def health():
     return {"ok": True}
 
+
 @app.get("/drops")
 def get_drops():
     return {"drops": drops, "pickup_radius_m": PICKUP_RADIUS_M}
+
 
 @app.get("/spawn")
 def spawn():
@@ -103,18 +111,24 @@ def spawn():
             "lon": lon,
             "type": random.choice(["зерно", "круасан", "золота чашка"])
         })
-    return {"spawned": True, "count": len(drops), "center": [RATNE_CENTER_LAT, RATNE_CENTER_LON], "radius_m": SPAWN_RADIUS_M}
+    return {
+        "spawned": True,
+        "count": len(drops),
+        "center": [RATNE_CENTER_LAT, RATNE_CENTER_LON],
+        "radius_m": SPAWN_RADIUS_M
+    }
+
 
 @app.get("/me")
 def me(user_id: str):
     u = get_user(user_id)
     return {"user_id": user_id, "inv": u["inv"], "rewards": compute_rewards(u["inv"])}
 
+
 @app.post("/collect")
 def collect(body: CollectRequest):
     global drops
 
-    # шукаємо дроп
     d = next((x for x in drops if x["id"] == body.drop_id), None)
     if not d:
         return {"ok": False, "reason": "not_found"}
@@ -122,12 +136,17 @@ def collect(body: CollectRequest):
     dist = haversine_m(body.lat, body.lon, d["lat"], d["lon"])
 
     if dist > PICKUP_RADIUS_M:
-        return {"ok": False, "reason": "too_far", "distance_m": round(dist, 1), "pickup_radius_m": PICKUP_RADIUS_M}
+        return {
+            "ok": False,
+            "reason": "too_far",
+            "distance_m": round(dist, 1),
+            "pickup_radius_m": PICKUP_RADIUS_M
+        }
 
-    # ✅ зібрали: прибираємо дроп
+    # ✅ remove drop
     drops = [x for x in drops if x["id"] != body.drop_id]
 
-    # ✅ додаємо в інвентар
+    # ✅ add to inventory
     u = get_user(body.user_id)
     t = d["type"]
     u["inv"][t] = u["inv"].get(t, 0) + 1
