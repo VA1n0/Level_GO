@@ -13,7 +13,7 @@ def health():
 def get_drops():
     return drops
 
-@app.post("/spawn")
+@app.get("/spawn")
 def spawn():
     global drops
     drops = [
