@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="uk">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1" />
+  <title>Level GO — Ratne</title>
+
+  <!-- Leaflet -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+  <style>
+    html, body { height: 100%; margin: 0; background:#0b0f14; color:#e7eef7; font-family: system-ui, Arial; }
+    #topbar{
+      position: fixed; left: 12px; right: 12px; top: 12px; z-index: 9999;
+      display:flex; gap:10px; align-items:center; justify-content:space-between;
+      background: rgba(15,18,25,.85); border:1px solid rgba(255,255,255,.08);
+      border-radius: 14px; padding: 10px 12px; backdrop-filter: blur(8px);
+    }
+    .btn{
+      border:1px solid rgba(255,255,255,.14);
+      background: rgba(255,255,255,.06);
+      color:#e7eef7;
+      padding: 10px 12px;
+      border-radius: 12px;
+      cursor:pointer;
+      font-weight:600;
+    }
+    .btn:active{ transform: scale(.99); }
+    #map{ position:absolute; inset:0; }
+    #panel{
+      position: fixed; left: 12px; right: 12px; bottom: 12px; z-index: 9999;
+      background: rgba(15,18,25,.85); border:1px solid rgba(255,255,255,.08);
+      border-radius: 14px; padding: 10px 12px; backdrop-filter: blur(8px);
+      display:flex; flex-direction:column; gap:6px;
+    }
+    .row{ display:flex; gap:10px; align-items:center; justify-content:space-between; flex-wrap:wrap; }
+    .tag{
+      padding:6px 10px; border-radius:999px;
+      background: rgba(255,255,255,.06);
+      border:1px solid rgba(255,255,255,.10);
+      font-size:12px;
+    }
+    .hint{ font-size:12px; opacity:.8; line-height:1.35; }
+    .ok{ color:#52ffa6; }
+    .bad{ color:#ff5c7a; }
+  </style>
+</head>
+<body>
+
+<div id="topbar">
+  <div style="display:flex;flex-direction:column;gap:2px">
+    <div style="font-weight:800;letter-spacing:.2px">Level GO — Ratne</div>
+    <div style="font-size:12px;opacity:.8">Збирай дропи де завгодно</div>
+  </div>
+  <div style="display:flex;gap:8px">
+    <button class="btn" id="btnLocate">📍 Я тут</button>
+    <button class="btn" id="btnRefresh">🔄 Оновити</button>
+  </div>
+</div>
+
+<div id="map"></div>
+
+<div id="panel">
+  <div class="row">
+    <div class="tag">API: <span id="apiStatus">…</span></div>
+    <div class="tag">Дропів: <span id="dropCount">0</span></div>
+    <div class="tag">Відстань до найближчого: <span id="nearest">—</span></div>
+  </div>
+  <div class="hint" id="hint">
+    Натисни <b>📍 Я тут</b>, дозволь геолокацію. Потім <b>🔄 Оновити</b>.
+    Клікни по дропу на карті — покажу дистанцію. Збір додамо наступним кроком.
+  </div>
+</div>
+
+<script>
+const API = "https://web-production-f2d5a.up.railway.app";
+
+const ratneCenter = [51.337, 24.555]; // приблизно центр смт Ратне
+const map = L.map('map', { zoomControl: false }).setView(ratneCenter, 14);
+
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  maxZoom: 19,
+  attribution: '&copy; OpenStreetMap'
+}).addTo(map);
+
+let meMarker = null;
+let meLatLng = null;
+let dropMarkers = [];
+
+function setApiStatus(text, ok=true){
+  const el = document.getElementById("apiStatus");
+  el.textContent = text;
+  el.className = ok ? "ok" : "bad";
+}
+
+async function checkApi(){
+  try{
+    const r = await fetch(API + "/health", { cache:"no-store" });
+    const j = await r.json();
+    if(j.ok) setApiStatus("online", true);
+    else setApiStatus("bad", false);
+  }catch(e){
+    setApiStatus("offline", false);
+  }
+}
+
+function haversineMeters(a, b){
+  const toRad = x => x * Math.PI / 180;
+  const R = 6371000;
+  const dLat = toRad(b.lat - a.lat);
+  const dLon = toRad(b.lng - a.lng);
+  const lat1 = toRad(a.lat);
+  const lat2 = toRad(b.lat);
+  const s = Math.sin(dLat/2)**2 + Math.cos(lat1)*Math.cos(lat2)*Math.sin(dLon/2)**2;
+  return 2 * R * Math.asin(Math.sqrt(s));
+}
+
+function clearDrops(){
+  dropMarkers.forEach(m => map.removeLayer(m));
+  dropMarkers = [];
+}
+
+function updateNearest(drops){
+  const el = document.getElementById("nearest");
+  if(!meLatLng || !drops.length){ el.textContent = "—"; return; }
+  let best = Infinity;
+  for(const d of drops){
+    const dist = haversineMeters(meLatLng, L.latLng(d.lat, d.lon));
+    if(dist < best) best = dist;
+  }
+  el.textContent = (best===Infinity) ? "—" : (best.toFixed(0) + " м");
+}
+
+async function spawnIfEmpty(){
+  const r = await fetch(API + "/drops", { cache:"no-store" });
+  const arr = await r.json();
+  if(Array.isArray(arr) && arr.length === 0){
+    await fetch(API + "/spawn", { cache:"no-store" });
+  }
+}
+
+async function loadDrops(){
+  await checkApi();
+  await spawnIfEmpty();
+
+  const r = await fetch(API + "/drops", { cache:"no-store" });
+  const drops = await r.json();
+
+  document.getElementById("dropCount").textContent = Array.isArray(drops) ? drops.length : 0;
+
+  clearDrops();
+
+  if(Array.isArray(drops)){
+    drops.forEach(d => {
+      const icon = L.divIcon({
+        className: '',
+        html: `<div style="
+          width:18px;height:18px;border-radius:999px;
+          background:rgba(255,255,255,.92);
+          border:2px solid rgba(255,70,70,.95);
+          box-shadow:0 0 18px rgba(255,70,70,.35);
+        "></div>`
+      });
+
+      const m = L.marker([d.lat, d.lon], { icon }).addTo(map);
+      m.on("click", () => {
+        if(!meLatLng){
+          document.getElementById("hint").innerHTML =
+            `Дроп: <b>${d.type}</b>. Увімкни геолокацію кнопкою <b>📍 Я тут</b>.`;
+          return;
+        }
+        const dist = haversineMeters(meLatLng, L.latLng(d.lat, d.lon));
+        document.getElementById("hint").innerHTML =
+          `Дроп: <b>${d.type}</b> • Відстань: <b>${dist.toFixed(0)} м</b>.`;
+      });
+
+      dropMarkers.push(m);
+    });
+  }
+
+  updateNearest(Array.isArray(drops) ? drops : []);
+}
+
+function locateMe(){
+  if(!navigator.geolocation){
+    document.getElementById("hint").textContent = "Браузер не підтримує геолокацію.";
+    return;
+  }
+
+  navigator.geolocation.getCurrentPosition(
+    (pos) => {
+      meLatLng = L.latLng(pos.coords.latitude, pos.coords.longitude);
+      if(!meMarker){
+        meMarker = L.circleMarker(meLatLng, {
+          radius: 10,
+          weight: 2,
+          color: "#ffffff",
+          fillColor: "#2d7dff",
+          fillOpacity: 0.9
+        }).addTo(map);
+      }else{
+        meMarker.setLatLng(meLatLng);
+      }
+      map.setView(meLatLng, 16);
+      document.getElementById("hint").innerHTML = `Геолокація ✅ Тепер натисни <b>🔄 Оновити</b>.`;
+      loadDrops();
+    },
+    (err) => {
+      document.getElementById("hint").textContent =
+        "Не вдалось отримати геолокацію. Дозволь доступ і повтори.";
+    },
+    { enableHighAccuracy: true, timeout: 10000 }
+  );
+}
+
+document.getElementById("btnLocate").addEventListener("click", locateMe);
+document.getElementById("btnRefresh").addEventListener("click", loadDrops);
+
+checkApi();
+loadDrops();
+</script>
+</body>
+</html>
